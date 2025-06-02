@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::mem::transmute;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,6 +9,7 @@ use crate::Aligned;
 
 pub struct Scope<'scope> {
     pub(crate) state: &'scope State,
+    _marker: PhantomData<*mut ()>,
 }
 
 impl Scope<'_> {
@@ -17,7 +19,7 @@ impl Scope<'_> {
     {
         let state = self.state;
 
-        let work = |index, _stop: &mut bool| f(index);
+        let work = |thread, _stop: &mut bool| f(thread);
 
         // SAFETY: `_guard` will reset `state.work` before this function returns,
         // but only after all pending workers are finished.
@@ -64,10 +66,10 @@ where
     };
 
     thread::scope(|scope| {
-        for index in 1..parallelism {
+        for thread in 1..parallelism {
             thread::Builder::new()
-                .name(format!("fork-join-scope-worker-{index}"))
-                .spawn_scoped(scope, move || state.worker(index))
+                .name(format!("fork-join-scope-worker-{thread}"))
+                .spawn_scoped(scope, move || state.worker(thread))
                 .unwrap();
         }
 
@@ -85,7 +87,10 @@ where
 
         let _guard = StopGuard(state);
 
-        f(Scope { state })
+        f(Scope {
+            state,
+            _marker: PhantomData,
+        })
     })
 }
 
@@ -102,7 +107,7 @@ unsafe impl Send for State {}
 unsafe impl Sync for State {}
 
 impl State {
-    fn worker(&self, index: usize) {
+    fn worker(&self, thread: usize) {
         let mut last_generation = 0;
 
         loop {
@@ -119,7 +124,7 @@ impl State {
 
             let mut stop = false;
 
-            self.work.get()(index, &mut stop);
+            self.work.get()(thread, &mut stop);
 
             if stop {
                 return;
@@ -132,7 +137,7 @@ impl State {
 
 type Work<'work> = dyn Fn(usize, &mut bool) + 'work;
 
-const STOP: &Work = &|_index, stop: &mut bool| *stop = true;
+const STOP: &Work = &|_thread, stop: &mut bool| *stop = true;
 
 #[cfg(test)]
 mod tests {
@@ -147,13 +152,32 @@ mod tests {
             .collect::<Vec<_>>();
 
         scope(Some(parallelism), |scope| {
-            scope.broadcast(|index| {
-                counts[index].fetch_add(1, Ordering::Relaxed);
+            scope.broadcast(|thread| {
+                counts[thread].fetch_add(1, Ordering::Relaxed);
             });
         });
 
         for count in &mut counts {
             assert_eq!(*count.get_mut(), 1);
         }
+    }
+
+    #[test]
+    fn scope_is_neither_send_nor_sync() {
+        trait Ambiguous<A> {
+            fn ambiguous() {}
+        }
+
+        impl<T> Ambiguous<()> for T {}
+
+        struct IsSend;
+
+        impl<T> Ambiguous<IsSend> for T where T: Send {}
+
+        struct IsSync;
+
+        impl<T> Ambiguous<IsSync> for T where T: Sync {}
+
+        let _ = <Scope as Ambiguous<_>>::ambiguous;
     }
 }
