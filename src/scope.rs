@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::hint::spin_loop;
 use std::marker::PhantomData;
 use std::mem::transmute;
 use std::num::NonZeroUsize;
@@ -36,8 +37,10 @@ impl Scope<'_> {
             fn drop(&mut self) {
                 let state = self.0;
 
+                let mut wait_count = 0;
+
                 while state.pending.load(Ordering::Acquire) != 0 {
-                    thread::yield_now();
+                    wait(&mut wait_count);
                 }
 
                 state.work.set(STOP);
@@ -111,6 +114,8 @@ impl State {
         let mut last_generation = 0;
 
         loop {
+            let mut wait_count = 0;
+
             loop {
                 let curr_generation = self.generation.load(Ordering::Acquire);
 
@@ -118,7 +123,7 @@ impl State {
                     last_generation = curr_generation;
                     break;
                 } else {
-                    thread::yield_now();
+                    wait(&mut wait_count);
                 }
             }
 
@@ -138,6 +143,18 @@ impl State {
 type Work<'work> = dyn Fn(usize, &mut bool) + 'work;
 
 const STOP: &Work = &|_thread, stop: &mut bool| *stop = true;
+
+fn wait(wait_count: &mut usize) {
+    if *wait_count < 6 {
+        for _ in 0..1 << *wait_count {
+            spin_loop();
+        }
+    } else {
+        thread::yield_now();
+    }
+
+    *wait_count += 1;
+}
 
 #[cfg(test)]
 mod tests {
