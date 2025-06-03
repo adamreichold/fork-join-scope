@@ -3,6 +3,7 @@ use std::hint::spin_loop;
 use std::marker::PhantomData;
 use std::mem::transmute;
 use std::num::NonZeroUsize;
+use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
@@ -20,12 +21,10 @@ impl Scope<'_> {
     {
         let state = self.state;
 
-        let work = |thread, _stop: &mut bool| f(thread);
-
         // SAFETY: `_guard` will reset `state.work` before this function returns,
         // but only after all pending workers are finished.
         unsafe {
-            state.work.set(transmute::<&Work, &'static Work>(&work));
+            state.work.set(transmute::<&Work, &'static Work>(&f));
         }
 
         state.pending.store(self.state.workers, Ordering::Relaxed);
@@ -127,22 +126,22 @@ impl State {
                 }
             }
 
-            let mut stop = false;
+            let work = self.work.get();
 
-            self.work.get()(thread, &mut stop);
-
-            if stop {
+            if ptr::eq(work, STOP) {
                 return;
             }
+
+            work(thread);
 
             self.pending.fetch_sub(1, Ordering::Release);
         }
     }
 }
 
-type Work<'work> = dyn Fn(usize, &mut bool) + 'work;
+type Work<'work> = dyn Fn(usize) + Sync + 'work;
 
-const STOP: &Work = &|_thread, stop: &mut bool| *stop = true;
+static STOP: &Work = &|_thread| ();
 
 fn wait(wait_count: &mut usize) {
     if *wait_count < 6 {
