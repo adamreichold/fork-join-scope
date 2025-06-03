@@ -19,6 +19,10 @@ impl Scope<'_> {
     where
         F: Fn(usize) + Sync,
     {
+        self.broadcast_impl(&f);
+    }
+
+    fn broadcast_impl(&self, f: &Work) {
         let state = self.state;
 
         // SAFETY: `_guard` will reset `state.work` before this function returns,
